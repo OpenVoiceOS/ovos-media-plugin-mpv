@@ -95,6 +95,13 @@ class TestOVOSMPVService(unittest.TestCase):
         self.assertEqual(info["uri"], "http://example.com/track.mp3")
         self.assertEqual(info["position"], 0)
 
+    def test_load_track_stores_metadata(self):
+        # AudioBackend.__init__ does not create self.meta; load_track must
+        # not raise AttributeError on the legacy service
+        self.service.load_track("http://example.com/track.mp3", {"title": "t"})
+        self.assertEqual(self.service._now_playing, "http://example.com/track.mp3")
+        self.assertEqual(self.service.meta["title"], "t")
+
     def test_track_metrics_without_mpv(self):
         # with no live mpv instance these must be safe no-ops / zero
         self.assertEqual(self.service.get_track_length(), 0)

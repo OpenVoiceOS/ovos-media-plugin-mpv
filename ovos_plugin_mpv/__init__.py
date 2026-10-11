@@ -238,6 +238,8 @@ class OVOSMPVService(MPVBaseService, AudioBackend):
 
     def __init__(self, config, bus=None, name='ovos_mpv'):
         AudioBackend.__init__(self, config, bus, name)
+        # MediaBackend.__init__ is skipped here; load_track() needs self.meta
+        self.meta = {}
         self._init_mpv_state()
 
 
