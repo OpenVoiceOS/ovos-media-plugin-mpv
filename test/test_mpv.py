@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import MagicMock
 
 from ovos_utils.fakebus import FakeBus
 from ovos_plugin_manager.templates.audio import AudioBackend
@@ -106,6 +107,20 @@ class TestOVOSMPVService(unittest.TestCase):
         # with no live mpv instance these must be safe no-ops / zero
         self.assertEqual(self.service.get_track_length(), 0)
         self.assertEqual(self.service.get_track_position(), 0)
+
+    def test_set_track_position_seeks_to_absolute_seconds(self):
+        # the bus carries milliseconds; mpv's "seek" takes seconds and is a
+        # relative jump unless told otherwise, so 30 s in must not become a
+        # 30000 s skip past the end of the track
+        self.service.mpv = MagicMock()
+        self.service.set_track_position(30000)
+        self.service.mpv.command.assert_called_once_with("seek", 30.0, "absolute")
+
+    def test_seek_forward_and_backward_stay_relative(self):
+        self.service.mpv = MagicMock()
+        self.service.seek_forward(5)
+        self.service.seek_backward(5)
+        self.service.mpv.command.assert_has_calls([(("seek", 5),), (("seek", -5),)])
 
     def test_control_methods_without_mpv_are_safe(self):
         # none of these should raise when mpv is not initialized
