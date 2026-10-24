@@ -190,7 +190,7 @@ class MPVBaseService(MediaBackend):
                 milliseconds (int): number of milliseconds of final position
         """
         if self.mpv:
-            self.mpv.command("seek", milliseconds)
+            self.mpv.command("seek", milliseconds / 1000, "absolute")
 
     def seek_forward(self, seconds=1):
         """
