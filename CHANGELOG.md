@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.3a1](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/tree/1.0.3a1) (2026-11-27)
+
+[Full Changelog](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/compare/1.0.2a1...1.0.3a1)
+
+**Merged pull requests:**
+
+- fix: legacy play\(\) is a no-op with no track loaded [\#34](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/pull/34) ([openvoiceos-bot](https://github.com/openvoiceos-bot))
+- fix: seek to an absolute position in set\_track\_position [\#32](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/pull/32) ([mikejgray](https://github.com/mikejgray))
+- fix: initialise self.meta on the legacy OVOSMPVService [\#31](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/pull/31) ([mikejgray](https://github.com/mikejgray))
+
 ## [1.0.2a1](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/tree/1.0.2a1) (2026-09-02)
 
 [Full Changelog](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/compare/1.0.1a1...1.0.2a1)
