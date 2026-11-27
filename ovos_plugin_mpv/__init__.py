@@ -28,6 +28,9 @@ class MPVMediaService(MediaBackend):
         self.low_volume = self.config.get('low_volume', 50)
         self.mpv: Optional[MPV] = None
         self._loaded_uri = None
+        # mpv playlist_entry_id -> uri; end-file names the entry that ended,
+        # which after a track change is not the one in _loaded_uri
+        self._entry_uris = {}
         self._seconds_to_error = 5
         self._started = threading.Event()
         self._timeout_timer: Optional[threading.Timer] = None
@@ -36,6 +39,7 @@ class MPVMediaService(MediaBackend):
     # mpv internals
     def init_mpv(self):
         self.mpv = MPV()
+        self._entry_uris.clear()  # a new mpv process numbers entries from 1
         self.mpv.volume = self.normal_volume
         self.mpv.bind_property_observer("eof-reached", self._handle_eof_reached)
         self.mpv.bind_property_observer("pause", self._handle_pause_property)
@@ -95,7 +99,12 @@ class MPVMediaService(MediaBackend):
         if isinstance(event_data, dict) and event_data.get("reason") == "error":
             error = (event_data.get("file_error") or event_data.get("error")
                      or "mpv playback error")
-        self.report_track_end(uri=self._loaded_uri, error=error)
+        self.report_track_end(uri=self._uri_of(event_data), error=error)
+
+    def _uri_of(self, event_data) -> Optional[str]:
+        if isinstance(event_data, dict) and "playlist_entry_id" in event_data:
+            return self._entry_uris.pop(event_data["playlist_entry_id"], None)
+        return self._loaded_uri
 
     def _handle_pause_property(self, key, val):
         # mpv's own OSC/keyboard bindings can pause/resume outside of our
@@ -110,8 +119,9 @@ class MPVMediaService(MediaBackend):
             self.report(PlaybackEvent.RESUMED, uri=self._loaded_uri)
 
     def _handle_mpv_error(self, *args, **kwargs):
-        error = kwargs.get("error") or (str(args[0]) if args else "mpv error")
-        self.report_track_end(uri=self._loaded_uri, error=str(error))
+        data = args[0] if args else None
+        error = kwargs.get("error") or (str(data) if data else "mpv error")
+        self.report_track_end(uri=self._uri_of(data), error=str(error))
 
     ############
     # mandatory abstract methods
@@ -135,10 +145,12 @@ class MPVMediaService(MediaBackend):
             self.init_mpv()
         self._started.clear()
         try:
-            self.mpv.play(uri)
+            entry = self.mpv.command("loadfile", uri)
         except Exception:
             LOG.exception(f"mpv failed to load {uri}")
             return False
+        if entry and "playlist_entry_id" in entry:
+            self._entry_uris[entry["playlist_entry_id"]] = uri
         return True
 
     def play(self):

@@ -70,7 +70,7 @@ class TestNewBackends(unittest.TestCase):
         reporter = RecordingReporter()
         svc.bind_event_reporter(reporter)
         svc.mpv = MagicMock()
-        svc.mpv.play.side_effect = RuntimeError("bad uri")
+        svc.mpv.command.side_effect = RuntimeError("bad uri")
 
         self.assertIs(svc.load_track("not-a-uri"), False)
         # load_track reports nothing per the base contract - the bool
@@ -108,6 +108,32 @@ class TestNewBackends(unittest.TestCase):
                            {"uri": "http://example.com/song.mp3"})])
         self.assertFalse(svc._started.is_set())
         self.assertFalse(svc._stop_requested)
+
+    def _switched_svc(self):
+        svc = MPVOCPAudioService({}, bus=FakeBus())
+        reporter = RecordingReporter()
+        svc.bind_event_reporter(reporter)
+        svc.mpv = MagicMock()
+        ids = iter([{"playlist_entry_id": 1}, {"playlist_entry_id": 2}])
+        svc.mpv.command.side_effect = lambda *a: next(ids)
+        svc.load_track("file:///a.wav")
+        svc.load_track("file:///b.wav")
+        return svc, reporter
+
+    def test_end_file_of_replaced_track_reports_its_own_uri(self):
+        svc, reporter = self._switched_svc()
+        svc._handle_end_file({"event": "end-file", "reason": "eof",
+                              "playlist_entry_id": 1})
+        self.assertEqual(reporter.events,
+                         [(PlaybackEvent.END_OF_MEDIA, {"uri": "file:///a.wav"})])
+
+    def test_error_of_replaced_track_reports_its_own_uri(self):
+        svc, reporter = self._switched_svc()
+        svc._handle_end_file({"event": "end-file", "reason": "error",
+                              "file_error": "bad", "playlist_entry_id": 1})
+        self.assertEqual(reporter.events,
+                         [(PlaybackEvent.ERROR,
+                           {"uri": "file:///a.wav", "error": "bad"})])
 
     def test_stop_then_end_file_reports_stopped(self):
         svc = MPVOCPAudioService({}, bus=FakeBus())
