@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.0a1](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/tree/2.0.0a1) (2026-11-27)
+
+[Full Changelog](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/compare/1.0.3a1...2.0.0a1)
+
+**Breaking changes:**
+
+- feat!: port MediaBackend classes to v2 [\#30](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/pull/30) ([JarbasAl](https://github.com/JarbasAl))
+
 ## [1.0.3a1](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/tree/1.0.3a1) (2026-11-27)
 
 [Full Changelog](https://github.com/OpenVoiceOS/ovos-media-plugin-mpv/compare/1.0.2a1...1.0.3a1)
