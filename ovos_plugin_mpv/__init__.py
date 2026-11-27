@@ -199,21 +199,20 @@ class MPVMediaService(MediaBackend):
         """ Extract info of current track. """
         return dict(self.meta)
 
-    def get_track_length(self) -> int:
-        """
-        getting the duration of the audio in milliseconds
-        """
-        if self.mpv:
-            return int((self.mpv.duration or 0) * 1000)  # seconds to ms
-        return -1
+    def get_track_length(self) -> Optional[int]:
+        """Duration in milliseconds, -1 for a stream with no duration,
+        None when nothing plays."""
+        if not self.mpv:
+            return None
+        if self.mpv.duration is None:
+            return -1
+        return int(self.mpv.duration * 1000)
 
-    def get_track_position(self) -> int:
-        """
-        get current position in milliseconds
-        """
-        if self.mpv:
-            return int((self.mpv.time_pos or 0) * 1000)  # seconds to ms
-        return -1
+    def get_track_position(self) -> Optional[int]:
+        """Position in milliseconds, None when nothing plays."""
+        if not self.mpv:
+            return None
+        return int((self.mpv.time_pos or 0) * 1000)
 
     def set_track_position(self, milliseconds):
         """
@@ -241,6 +240,7 @@ class OVOSMPVService(AudioBackend):
 
     def __init__(self, config, bus=None, name='ovos_mpv'):
         super(OVOSMPVService, self).__init__(config, bus, name)
+        self.meta = {}
         self.normal_volume = self.config.get('initial_volume', 100)
         self.low_volume = self.config.get('low_volume', 50)
         self._playback_time = 0
@@ -334,8 +334,15 @@ class OVOSMPVService(AudioBackend):
         """
         return ['file', 'http', 'https']
 
+    def load_track(self, uri, metadata=None):
+        self.meta.update(metadata or {})
+        super().load_track(uri)
+
     def play(self, repeat=False):
         """ Play playlist using mpv. """
+        if not self._now_playing:
+            LOG.debug("play ignored: no track loaded")
+            return
         if not self.mpv:
             self.init_mpv()
         self._started.clear()
@@ -396,7 +403,7 @@ class OVOSMPVService(AudioBackend):
                 milliseconds (int): number of milliseconds of final position
         """
         if self.mpv:
-            self.mpv.command("seek", milliseconds)
+            self.mpv.command("seek", milliseconds / 1000, "absolute")
 
     def seek_forward(self, seconds=1):
         """

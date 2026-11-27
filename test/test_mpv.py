@@ -240,9 +240,23 @@ class TestNewBackends(unittest.TestCase):
         self.assertTrue(hasattr(svc, "_stop"))
 
     def test_track_metrics_without_mpv(self):
+        # template: None means nothing plays
         svc = MPVOCPAudioService({}, bus=FakeBus())
+        self.assertIsNone(svc.get_track_length())
+        self.assertIsNone(svc.get_track_position())
+
+    def test_track_length_of_a_stream_is_minus_one(self):
+        # template: -1 means infinite duration; mpv reports none for a stream
+        svc = MPVOCPAudioService({}, bus=FakeBus())
+        svc.mpv = MagicMock(duration=None, time_pos=12.5)
         self.assertEqual(svc.get_track_length(), -1)
-        self.assertEqual(svc.get_track_position(), -1)
+        self.assertEqual(svc.get_track_position(), 12500)
+
+    def test_track_metrics_of_a_file_are_milliseconds(self):
+        svc = MPVOCPAudioService({}, bus=FakeBus())
+        svc.mpv = MagicMock(duration=3.25, time_pos=None)
+        self.assertEqual(svc.get_track_length(), 3250)
+        self.assertEqual(svc.get_track_position(), 0)
 
     def test_control_methods_without_mpv_are_safe(self):
         svc = MPVOCPAudioService({}, bus=FakeBus())
@@ -307,10 +321,31 @@ class TestOVOSMPVService(unittest.TestCase):
         self.assertEqual(info["uri"], "http://example.com/track.mp3")
         self.assertEqual(info["position"], 0)
 
+    def test_load_track_stores_metadata(self):
+        # AudioBackend.__init__ does not create self.meta; load_track must
+        # not raise AttributeError on the legacy service
+        self.service.load_track("http://example.com/track.mp3", {"title": "t"})
+        self.assertEqual(self.service._now_playing, "http://example.com/track.mp3")
+        self.assertEqual(self.service.meta["title"], "t")
+
     def test_track_metrics_without_mpv(self):
         # with no live mpv instance these must be safe no-ops / zero
         self.assertEqual(self.service.get_track_length(), 0)
         self.assertEqual(self.service.get_track_position(), 0)
+
+    def test_set_track_position_seeks_to_absolute_seconds(self):
+        # the bus carries milliseconds; mpv's "seek" takes seconds and is a
+        # relative jump unless told otherwise, so 30 s in must not become a
+        # 30000 s skip past the end of the track
+        self.service.mpv = MagicMock()
+        self.service.set_track_position(30000)
+        self.service.mpv.command.assert_called_once_with("seek", 30.0, "absolute")
+
+    def test_seek_forward_and_backward_stay_relative(self):
+        self.service.mpv = MagicMock()
+        self.service.seek_forward(5)
+        self.service.seek_backward(5)
+        self.service.mpv.command.assert_has_calls([(("seek", 5),), (("seek", -5),)])
 
     def test_control_methods_without_mpv_are_safe(self):
         # none of these should raise when mpv is not initialized
