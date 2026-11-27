@@ -127,6 +127,14 @@ class TestNewBackends(unittest.TestCase):
         self.assertEqual(reporter.events,
                          [(PlaybackEvent.END_OF_MEDIA, {"uri": "file:///a.wav"})])
 
+    def test_end_file_drops_older_entries(self):
+        svc, reporter = self._switched_svc()
+        svc._handle_end_file({"event": "end-file", "reason": "eof",
+                              "playlist_entry_id": 2})
+        self.assertEqual(reporter.events,
+                         [(PlaybackEvent.END_OF_MEDIA, {"uri": "file:///b.wav"})])
+        self.assertEqual(svc._entry_uris, {})
+
     def test_error_of_replaced_track_reports_its_own_uri(self):
         svc, reporter = self._switched_svc()
         svc._handle_end_file({"event": "end-file", "reason": "error",

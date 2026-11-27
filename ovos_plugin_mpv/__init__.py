@@ -103,7 +103,13 @@ class MPVMediaService(MediaBackend):
 
     def _uri_of(self, event_data) -> Optional[str]:
         if isinstance(event_data, dict) and "playlist_entry_id" in event_data:
-            return self._entry_uris.pop(event_data["playlist_entry_id"], None)
+            entry_id = event_data["playlist_entry_id"]
+            # loadfile replaces the playlist, so every older entry has ended
+            # too; an older id is left here when its end-file came before
+            # loadfile returned
+            for stale in [i for i in self._entry_uris if i < entry_id]:
+                del self._entry_uris[stale]
+            return self._entry_uris.pop(entry_id, None)
         return self._loaded_uri
 
     def _handle_pause_property(self, key, val):
