@@ -242,6 +242,12 @@ class OVOSMPVService(MPVBaseService, AudioBackend):
         self.meta = {}
         self._init_mpv_state()
 
+    def play(self, repeat=False):
+        if not self._now_playing:
+            LOG.debug("play ignored: no track loaded")
+            return
+        super().play(repeat)
+
 
 def load_service(base_config, bus):
     backends = base_config.get('backends', [])
