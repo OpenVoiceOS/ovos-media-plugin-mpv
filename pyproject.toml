@@ -13,17 +13,14 @@ authors = [
 ]
 keywords = ["ovos", "audio", "video", "OCP", "plugin", "mpv"]
 dependencies = [
-    "ovos-plugin-manager>=2.1.0,<3.0.0",
+    # PlaybackEvent and the MediaBackend v2 template exist only in opm 3
+    "ovos-plugin-manager>=3.1.0a1,<4.0.0",
     "python-mpv-jsonipc"
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest",
-    # end-to-end harness: drives the real backend through a real OCPMediaPlayer.
-    # [media] (the OCPPlayerHarness) ships in ovoscope 0.21.0a1; floor-pin so pip
-    # resolves the prerelease without --pre.
-    "ovoscope[media]>=0.21.0a1",
 ]
 
 [project.urls]

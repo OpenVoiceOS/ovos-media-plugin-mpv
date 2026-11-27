@@ -1,40 +1,252 @@
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 from ovos_bus_client.message import Message
 from ovos_plugin_manager.templates.audio import AudioBackend
 from ovos_plugin_manager.templates.media import (
-    MediaBackend, AudioPlayerBackend, VideoPlayerBackend)
+    AudioPlayerBackend, MediaBackend, PlaybackEvent, VideoPlayerBackend)
 from ovos_utils.log import LOG
 from ovos_utils.fakebus import FakeBus
 from python_mpv_jsonipc import MPV
 
 
-class MPVBaseService(MediaBackend):
-    """Shared mpv engine.
+class MPVMediaService(MediaBackend):
+    """mpv engine for the ovos-media v2 backends.
 
-    Holds all the playback logic (lazy ``MPV`` instance, event observers,
-    play/stop/pause/seek/volume, position tracking). It is shared by both
-    backend flavours so they drive one engine with no duplicated logic:
-
-    * new ``ovos-media`` — :class:`MPVOCPAudioService` / :class:`MPVOCPVideoService`
-      (``AudioPlayerBackend`` / ``VideoPlayerBackend``)
-    * legacy ``ovos-audio`` — :class:`OVOSMPVService` (``AudioBackend``)
+    Only physical playback events observed on the mpv process are reported
+    upstream via ``self.report`` - no bus state is emitted here, the daemon
+    that owns this plugin drives the player state machine off those events.
     """
+
+    can_seek = True
+    can_pause = True
 
     def __init__(self, config, bus=None):
         super().__init__(config, bus)
-        self._init_mpv_state()
+        self.normal_volume = self.config.get('initial_volume', 100)
+        self.low_volume = self.config.get('low_volume', 50)
+        self.mpv: Optional[MPV] = None
+        self._loaded_uri = None
+        # mpv playlist_entry_id -> uri; end-file names the entry that ended,
+        # which after a track change is not the one in _loaded_uri
+        self._entry_uris = {}
+        self._seconds_to_error = 5
+        self._started = threading.Event()
+        self._timeout_timer: Optional[threading.Timer] = None
 
-    def _init_mpv_state(self):
-        """Set up mpv-specific instance state.
+    ###################
+    # mpv internals
+    def init_mpv(self):
+        self.mpv = MPV()
+        self._entry_uris.clear()  # a new mpv process numbers entries from 1
+        self.mpv.volume = self.normal_volume
+        self.mpv.bind_property_observer("eof-reached", self._handle_eof_reached)
+        self.mpv.bind_property_observer("pause", self._handle_pause_property)
+        self.mpv.bind_event("end-file", self._handle_end_file)
+        # TODO - doesnt seem to be called on bad tracks requested?
+        self.mpv.bind_event("error", self._handle_mpv_error)
 
-        Factored out of ``__init__`` so the legacy ``AudioBackend`` adapter
-        (whose constructor takes a ``name``) can reuse it after its own base
-        ``__init__`` has run. ``self.config``/``self.bus`` are already set by the
-        framework base constructor.
+    def _check_start_timeout(self):
+        """if playback doesnt start within the configured timeout, assume MPV error happened"""
+        if not self._started.is_set():
+            LOG.error(f"time out error! track should have started playing by now,"
+                      f" is the uri valid? {self._loaded_uri}")
+            self._handle_mpv_error("timeout")
+
+    def _handle_eof_reached(self, key, val):
+        """Only used to detect playback actually starting (val is False).
+
+        End-of-playback is reported from ``_handle_end_file`` instead - the
+        mpv "end-file" event carries the *reason* (eof/stop/error) that
+        ``report_track_end`` needs to tell a natural end from an explicit
+        ``stop()`` apart.
         """
+        LOG.debug(f"MPV EOF event: {key} - {val}")
+        if val is None and not self._started.is_set():
+            # not started yet, arm a timeout so an invalid uri that never
+            # starts playback still gets reported as an error
+            if self._timeout_timer:
+                self._timeout_timer.cancel()
+            self._timeout_timer = threading.Timer(self._seconds_to_error,
+                                                   self._check_start_timeout)
+            self._timeout_timer.daemon = True
+            self._timeout_timer.start()
+            return
+
+        if val is False:
+            if self._timeout_timer:
+                self._timeout_timer.cancel()
+                self._timeout_timer = None
+            self._started.set()
+            LOG.debug('MPV playback start')
+            self.report(PlaybackEvent.TRACK_START, uri=self._loaded_uri)
+
+    def _handle_end_file(self, event_data):
+        """Single call site for end-of-track reporting.
+
+        mpv's "end-file" event carries *reason* (eof/stop/error/quit/
+        redirect) - map a "error" reason to ``report_track_end``'s
+        ``error`` kwarg, otherwise let the base class's explicit-stop flag
+        (set by ``stop()``) decide between ``STOPPED`` and ``END_OF_MEDIA``.
+        """
+        LOG.debug(f"MPV end-file event: {event_data}")
+        if self._timeout_timer:
+            self._timeout_timer.cancel()
+            self._timeout_timer = None
+        self._started.clear()
+        error = None
+        if isinstance(event_data, dict) and event_data.get("reason") == "error":
+            error = (event_data.get("file_error") or event_data.get("error")
+                     or "mpv playback error")
+        self.report_track_end(uri=self._uri_of(event_data), error=error)
+
+    def _uri_of(self, event_data) -> Optional[str]:
+        if isinstance(event_data, dict) and "playlist_entry_id" in event_data:
+            entry_id = event_data["playlist_entry_id"]
+            # loadfile replaces the playlist, so every older entry has ended
+            # too; an older id is left here when its end-file came before
+            # loadfile returned
+            for stale in [i for i in self._entry_uris if i < entry_id]:
+                del self._entry_uris[stale]
+            return self._entry_uris.pop(entry_id, None)
+        return self._loaded_uri
+
+    def _handle_pause_property(self, key, val):
+        # mpv's own OSC/keyboard bindings can pause/resume outside of our
+        # pause()/resume() calls - this observer is the only place that
+        # actually knows the physical pause state, so it is the single
+        # source of PAUSED/RESUMED reports regardless of who triggered them
+        if not self._started.is_set():
+            return
+        if val:
+            self.report(PlaybackEvent.PAUSED, uri=self._loaded_uri)
+        else:
+            self.report(PlaybackEvent.RESUMED, uri=self._loaded_uri)
+
+    def _handle_mpv_error(self, *args, **kwargs):
+        data = args[0] if args else None
+        error = kwargs.get("error") or (str(data) if data else "mpv error")
+        self.report_track_end(uri=self._uri_of(data), error=str(error))
+
+    ############
+    # mandatory abstract methods
+    def supported_uris(self) -> List[str]:
+        """List of supported uri types.
+
+        Returns:
+            list: Supported uri's
+        """
+        return ['file', 'http', 'https']
+
+    def load_track(self, uri: str, metadata: dict = None) -> bool:
+        """Load a track for playback via mpv.
+
+        Reports nothing on success or failure, per the base contract - the
+        return value is the only signal.
+        """
+        self.meta = metadata or {}
+        self._loaded_uri = uri
+        if not self.mpv:
+            self.init_mpv()
+        self._started.clear()
+        try:
+            entry = self.mpv.command("loadfile", uri)
+        except Exception:
+            LOG.exception(f"mpv failed to load {uri}")
+            return False
+        if entry and "playlist_entry_id" in entry:
+            self._entry_uris[entry["playlist_entry_id"]] = uri
+        return True
+
+    def play(self):
+        """ Play the loaded track using mpv. """
+        if self.mpv:
+            self.mpv.pause = False
+
+    def _stop(self) -> bool:
+        """ Stop mpv playback.
+
+        Reports nothing itself - the resulting mpv "end-file" event (see
+        ``_handle_end_file``) reports ``PlaybackEvent.STOPPED`` once it
+        observes the explicit-stop flag ``stop()`` set.
+        """
+        if self.mpv:
+            try:
+                # best-effort: let mpv unload the file and fire its own
+                # end-file(reason=stop) before we tear the process down
+                self.mpv.command("stop")
+            except Exception:
+                pass
+            self.mpv.terminate()
+            self.mpv = None
+            return True
+        return False
+
+    def pause(self):
+        """ Pause mpv playback. """
+        if self.mpv:
+            self.mpv.pause = True
+
+    def resume(self):
+        """ Resume paused playback. """
+        if self.mpv:
+            self.mpv.pause = False
+
+    def lower_volume(self):
+        if self.mpv:
+            self.mpv.volume = self.low_volume
+
+    def restore_volume(self):
+        if self.mpv:
+            self.mpv.volume = self.normal_volume
+
+    def track_info(self):
+        """ Extract info of current track. """
+        return dict(self.meta)
+
+    def get_track_length(self) -> Optional[int]:
+        """Duration in milliseconds, -1 for a stream with no duration,
+        None when nothing plays."""
+        if not self.mpv:
+            return None
+        if self.mpv.duration is None:
+            return -1
+        return int(self.mpv.duration * 1000)
+
+    def get_track_position(self) -> Optional[int]:
+        """Position in milliseconds, None when nothing plays."""
+        if not self.mpv:
+            return None
+        return int((self.mpv.time_pos or 0) * 1000)
+
+    def set_track_position(self, milliseconds):
+        """
+        go to position in milliseconds
+
+          Args:
+                milliseconds (int): number of milliseconds of final position
+        """
+        if self.mpv:
+            self.mpv.command("seek", milliseconds / 1000, "absolute")
+
+
+# --- new ovos-media backends (opm.media.audio / opm.media.video) ------------
+class MPVOCPAudioService(MPVMediaService, AudioPlayerBackend):
+    """mpv audio backend for the new ovos-media service."""
+
+
+class MPVOCPVideoService(MPVMediaService, VideoPlayerBackend):
+    """mpv video backend for the new ovos-media service."""
+
+
+# --- legacy ovos-audio service backend (mycroft.plugin.audioservice) --------
+class OVOSMPVService(AudioBackend):
+    """mpv backend for the legacy ovos-audio service."""
+
+    def __init__(self, config, bus=None, name='ovos_mpv'):
+        super(OVOSMPVService, self).__init__(config, bus, name)
+        self.meta = {}
         self.normal_volume = self.config.get('initial_volume', 100)
         self.low_volume = self.config.get('low_volume', 50)
         self._playback_time = 0
@@ -108,7 +320,7 @@ class MPVBaseService(MediaBackend):
             self._last_sync = time.time()
             try:
                 self.ocp_sync_playback(self._playback_time)
-            except:  # too old OPM version / new MediaBackend without the helper
+            except:  # too old OPM version
                 self.bus.emit(Message("ovos.common_play.playback_time",
                                       {"position": self._playback_time,
                                        "length": self.get_track_length()}))
@@ -128,8 +340,15 @@ class MPVBaseService(MediaBackend):
         """
         return ['file', 'http', 'https']
 
+    def load_track(self, uri, metadata=None):
+        self.meta.update(metadata or {})
+        super().load_track(uri)
+
     def play(self, repeat=False):
         """ Play playlist using mpv. """
+        if not self._now_playing:
+            LOG.debug("play ignored: no track loaded")
+            return
         if not self.mpv:
             self.init_mpv()
         self._started.clear()
@@ -211,42 +430,6 @@ class MPVBaseService(MediaBackend):
         """
         if self.mpv:
             self.mpv.command("seek", seconds * -1)
-
-
-# --- new ovos-media backends (opm.media.audio / opm.media.video) ------------
-class MPVOCPAudioService(AudioPlayerBackend, MPVBaseService):
-    """mpv audio backend for the new ovos-media service."""
-
-    def __init__(self, config, bus=None):
-        super().__init__(config, bus)
-
-
-class MPVOCPVideoService(VideoPlayerBackend, MPVBaseService):
-    """mpv video backend for the new ovos-media service."""
-
-    def __init__(self, config, bus=None):
-        super().__init__(config, bus)
-
-
-# --- legacy ovos-audio service backend (mycroft.plugin.audioservice) --------
-class OVOSMPVService(MPVBaseService, AudioBackend):
-    """mpv backend for the legacy ovos-audio service.
-
-    ``MPVBaseService`` is listed first so its concrete playback methods satisfy
-    ``AudioBackend``'s abstract methods (MRO order matters).
-    """
-
-    def __init__(self, config, bus=None, name='ovos_mpv'):
-        AudioBackend.__init__(self, config, bus, name)
-        # MediaBackend.__init__ is skipped here; load_track() needs self.meta
-        self.meta = {}
-        self._init_mpv_state()
-
-    def play(self, repeat=False):
-        if not self._now_playing:
-            LOG.debug("play ignored: no track loaded")
-            return
-        super().play(repeat)
 
 
 def load_service(base_config, bus):
